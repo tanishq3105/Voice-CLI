@@ -1,7 +1,5 @@
 // executor.c
 
-// brew install json-c
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,13 +11,28 @@
 
 #define SHM_KEY 1234
 #define SHM_SIZE 4096
+#define MAX_ARGS 100
 
 void execute_command(struct json_object *cmd_array) {
-    int len = json_object_array_length(cmd_array);
-    char *args[len + 1];
+    if (!cmd_array || json_object_get_type(cmd_array) != json_type_array) {
+        fprintf(stderr, "Invalid command array\n");
+        return;
+    }
 
+    int len = json_object_array_length(cmd_array);
+    if (len > MAX_ARGS) {
+        fprintf(stderr, "Too many arguments\n");
+        return;
+    }
+
+    char *args[MAX_ARGS + 1];
     for (int i = 0; i < len; i++) {
-        args[i] = (char *)json_object_get_string(json_object_array_get_idx(cmd_array, i));
+        struct json_object *arg_obj = json_object_array_get_idx(cmd_array, i);
+        if (!arg_obj || json_object_get_type(arg_obj) != json_type_string) {
+            fprintf(stderr, "Invalid argument type at index %d\n", i);
+            return;
+        }
+        args[i] = (char *)json_object_get_string(arg_obj);
     }
     args[len] = NULL;
 
@@ -29,8 +42,11 @@ void execute_command(struct json_object *cmd_array) {
         execvp(args[0], args);
         perror("execvp failed");
         exit(1);
+    } else if (pid > 0) {
+        // Parent process
+        wait(NULL);
     } else {
-        wait(NULL); // Wait for child to finish
+        perror("fork failed");
     }
 }
 
@@ -48,23 +64,28 @@ int main() {
     }
 
     struct json_object *parsed = json_tokener_parse(data);
+    if (!parsed) {
+        fprintf(stderr, "Failed to parse JSON from shared memory\n");
+        shmdt(data);
+        return 1;
+    }
+
     if (json_object_get_type(parsed) == json_type_array) {
-        // Check if nested array
         struct json_object *first = json_object_array_get_idx(parsed, 0);
-        if (json_object_get_type(first) == json_type_array) {
-            // Multiple commands
+        if (first && json_object_get_type(first) == json_type_array) {
+            // Nested array (multiple commands)
             for (int i = 0; i < json_object_array_length(parsed); i++) {
-                execute_command(json_object_array_get_idx(parsed, i));
+                struct json_object *cmd = json_object_array_get_idx(parsed, i);
+                execute_command(cmd);
             }
         } else {
-            // Single command
+            // Single command array
             execute_command(parsed);
         }
     } else if (json_object_get_type(parsed) == json_type_string) {
-        const char *msg = json_object_get_string(parsed);
-        printf("LLM Response: %s\n", msg);
+        printf("LLM Response: %s\n", json_object_get_string(parsed));
     } else {
-        printf("Invalid format from shared memory.\n");
+        fprintf(stderr, "Unexpected JSON format from shared memory.\n");
     }
 
     shmdt(data);
